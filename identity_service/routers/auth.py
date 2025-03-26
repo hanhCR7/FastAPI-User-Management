@@ -1,0 +1,128 @@
+import os
+from dotenv import load_dotenv
+from jose import jwt
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from passlib.context import CryptContext
+from sqlalchemy.orm import Session
+from schemas import SignUp, ChangePassword
+from models import Role, UserRole, BackListTokens
+from databases import get_db
+from auth_per import get_current_user
+from connect_service import get_user, get_user_with_password, log_user_action, sign_up_user, update_last_login, update_password, verify_password
+router = APIRouter(prefix="/api/identity_service",tags=["authentication"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/identity_service/login")
+load_dotenv()
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = 'HS256'
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    to_encode["sub"] = str(to_encode.get("sub", ""))
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire, "role": data.get("role", "User")})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+def decode_token(token: str):
+    try:
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token đã hết hạn")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token không hợp lệ")
+@router.post("/login", status_code=status.HTTP_200_OK)
+async def login(login: OAuth2PasswordRequestForm = Depends(), db: dict = Depends(get_db)):
+    """Trang đăng nhập"""
+    user_response = await get_user_with_password(login.username, login.password)
+    print(user_response)
+    if not user_response:
+        raise HTTPException(status_code=404, detail="Tài khoản hoặc mật khẩu không đúng.")
+    user_id = user_response.get('user_id')
+    username = user_response.get('username')
+    is_active = user_response.get("is_active")
+    role_user = db.query(Role).join(UserRole, Role.id == UserRole.role_id).filter(UserRole.user_id == user_id).first().name
+    if not user_id:
+        raise HTTPException(status_code=500, detail="Lỗi xác thực!!")
+    if is_active != True:
+        raise HTTPException(status_code=401, detail="Tài khoản của bạn bị vô hiệu hóa. Vui lòng liên hệ Admin để mở lại tài khoản.")   
+    if not await update_last_login(user_id):
+        raise HTTPException(status_code=500, detail="Không cập nhật được lần đăng nhập cuối cùng")
+    access_token = create_access_token(data={"sub": user_id, "role": role_user, "username": username})
+    await log_user_action(user_id, f"{username} đã đăng nhập thành công!")
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "username": username
+    }
+@router.post("/sign_up", status_code=status.HTTP_201_CREATED)
+async def sign_up(sign_up: SignUp, db: dict = Depends(get_db)):
+    """Trang đăng ký"""
+    user_response = await sign_up_user(
+        sign_up.first_name, sign_up.last_name, sign_up.username, sign_up.email, sign_up.password
+    )
+    
+    if not user_response or "user" not in user_response or "id" not in user_response["user"]:
+        raise HTTPException(status_code=500, detail="Lỗi: Không lấy được user_id từ User Service")
+    role = db.query(Role).filter(Role.name == "User").first()
+    user_id = user_response["user"]["id"]
+    db.add(UserRole(user_id=user_id, role_id=role.id))
+    db.commit()
+    await log_user_action(user_id, f"{sign_up.username} đã đăng ký thành công!")
+    return {
+        "message": "Người dùng đã đăng ký thành công!", 
+        "user_id": user_response["user"]["id"],
+        "username": sign_up.username,
+        "email": sign_up.email
+    }
+@router.put("/change-password", status_code=status.HTTP_200_OK)
+async def change_password(request: ChangePassword, current_user: dict = Depends(get_current_user)):
+    """Trang đổi mật khẩu"""
+    username = current_user["username"]
+    user_response = await get_user_with_password(username, request.old_password)
+    if not user_response:
+        raise HTTPException(status_code=404, detail="Người dùng không tồn tại!")
+    user_id = user_response["user_id"]
+    token = current_user["token"]
+    try:
+        await update_password(user_id, request.old_password, request.new_password, token)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Lỗi cập nhật mật khẩu")
+    await log_user_action(user_id, f"{username} đã đổi mật khẩu thành công!")
+    return {
+        "message": "Đổi mật khẩu thành công"
+    }
+@router.post('/logout', status_code=status.HTTP_200_OK)
+async def logout(token: str = Depends(oauth2_scheme), current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Trang đăng xuất"""
+    db.add(BackListTokens(token=token))
+    db.commit()
+    await log_user_action(current_user["user_id"], f"{current_user['username']} đã đăng xuất thành công!")
+    return {
+        "detail": "Đăng xuất thành công!"
+    }
+
+@router.get("/validate-token", status_code=status.HTTP_200_OK)
+async def validate_token(token: str = Depends(oauth2_scheme), current_user: dict = Depends(get_current_user)):
+    """Trang kiểm tra token"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        role: str = payload.get("role")
+        username: str = payload.get("username")
+        if not user_id or not role or not username:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token payload không hợp lệ")
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token đã hết hạn!")
+    except jwt.JWTError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token không đúng")
+    # Lấy user từ User Service
+    user_response = await get_user(user_id)
+    if not user_response or "user" not in user_response:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Người dùng không tồn tại!")
+    user_data = user_response['user']  # Lấy thông tin người dùng từ 'user'
+    return {
+        "user_id": user_data["id"],
+        "username": user_data["username"],
+        "role": role
+    }  
