@@ -4,3 +4,4 @@ Xây dựng ứng dụng quản lý user bằng fastapi và microservice
 pip install fastapi uvicorn pydantic python-dotenv aiosmtplib sqlalchemy asyncpg httpx passlib psycopg2
 
 ## Đây là project
+
