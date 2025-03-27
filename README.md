@@ -26,3 +26,4 @@ Xây dựng ứng dụng quản lý user bằng fastapi và microservice
     uvicorn main:app --host localhost --port 9002 -- reload
 ```
 ##
+# Tạo file .env
