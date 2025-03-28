@@ -85,3 +85,6 @@ class SignUp(BaseModel):
         if not re.search(r'[A-Z]', value):
             raise ValueError("Mật khẩu phải chứa ít nhất một chữ cái viết hoa")
         return value
+class VerifyOTP(BaseModel):
+    user_id: int
+    otp: str

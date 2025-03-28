@@ -5,7 +5,8 @@ from fastapi import Depends
 from dotenv import load_dotenv
 import os
 import httpx
-USER_SERVICE_URL = 'http://localhost:9000/api/user_service/'
+USER_SERVICE_URL = os.getenv('USER_SERVICE_URL')
+EMAIL_SERVICE_URL = os.getenv('EMAIL_SERVICE_URL')
 bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/identity_service/login")
 load_dotenv()
@@ -71,7 +72,6 @@ async def sign_up_user(first_name: str, last_name: str, username: str, email: st
                     "password_hash": password_hash
                 }
             )
-            print("Response: ", response.text)
             if response.status_code == 201:
                 return response.json()
         except httpx.RequestError as e:
@@ -104,5 +104,52 @@ async def log_user_action(user_id: int, action: str):
             if response.status_code == 201:
                 return response.json()
             raise Exception(f"Request error: {response.text}")
+        except httpx.RequestError as e:
+            raise Exception(f"Request error: {str(e)}")
+#Kích hoạt account
+async def generate_activation_token(user_id: int):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(f'{USER_SERVICE_URL}generate-activation-token', json={"user_id": user_id})
+            if response.status_code == 200:
+                return response.json()
+        except httpx.RequestError as e:
+            raise Exception(f"Request error: {str(e)}")
+# COnnect to email service
+async def active_account(user_id: int, email: str, activation_token: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f'{EMAIL_SERVICE_URL}send-activation-email/',
+                json={"user_id": user_id, "recipient": email, "activation_token": activation_token}
+            )
+            if response.status_code == 200:
+                return response.json()
+        except httpx.RequestError as e:
+            print(f"Loi connect: {str(e)}")
+            raise Exception(f"Request error: {str(e)}")
+# Send Email OTP
+async def send_email_otp(user_id: int, email: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f'{EMAIL_SERVICE_URL}send-otp-email/',
+                json={"user_id": user_id, "email": email}
+            )
+            if response.status_code == 200:
+                return response.json()
+        except httpx.RequestError as e:
+            print(f"Error when sending OTP: {e}")
+            raise Exception(f"Request error: {str(e)}")
+# Validate OTP
+async def validate_otp(user_id: int, otp: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(
+                f'{EMAIL_SERVICE_URL}validate-otp/',
+                json={"user_id": user_id, "otp": otp}
+            )
+            if response.status_code == 200:
+                return response.json()
         except httpx.RequestError as e:
             raise Exception(f"Request error: {str(e)}")

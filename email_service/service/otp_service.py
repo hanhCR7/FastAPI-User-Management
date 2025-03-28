@@ -9,6 +9,7 @@ from connect_service import get_user
 load_dotenv()
 OTP_EXPIRATION_TIME = int(os.getenv("OTP_EXPIRATION_TIME"))
 async def generate_otp(db: db_dependency, user_id: int):
+    """Tạo và lưu mã OTP vào database."""
     # Generate a random OTP code
     otp_code = str(random.randint(100000, 999999))
     # Set the expiration time for the OTP code
@@ -19,7 +20,7 @@ async def generate_otp(db: db_dependency, user_id: int):
     db.add(otp_entry)
     db.commit()
     return otp_code
-async def validate_otp(db: db_dependency, user_id: int, otp_code: str):
+async def validate_otp(user_id: int, otp_code: str, db: db_dependency):
     # Retrieve the OTP entry from the database
     otp_entry = db.query(OTPcode).filter(OTPcode.user_id == user_id, OTPcode.code == otp_code).first()
     # Check if the OTP code is valid

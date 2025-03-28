@@ -1,4 +1,5 @@
 import os
+import asyncio
 from dotenv import load_dotenv
 from jose import jwt
 from datetime import datetime, timedelta
@@ -6,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
-from schemas import SignUp, ChangePassword
+from schemas import SignUp, ChangePassword, VerifyOTP
 from models import Role, UserRole, BackListTokens
 from databases import get_db
 from auth_per import get_current_user
-from connect_service import get_user, get_user_with_password, log_user_action, sign_up_user, update_last_login, update_password, verify_password
+from connect_service import get_user, get_user_with_password, log_user_action, sign_up_user, update_last_login, update_password, active_account, generate_activation_token, send_email_otp, validate_otp
 router = APIRouter(prefix="/api/identity_service",tags=["authentication"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/identity_service/login")
 load_dotenv()
@@ -32,45 +33,102 @@ def decode_token(token: str):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token không hợp lệ")
 @router.post("/login", status_code=status.HTTP_200_OK)
-async def login(login: OAuth2PasswordRequestForm = Depends(), db: dict = Depends(get_db)):
-    """Trang đăng nhập"""
+async def login(login: OAuth2PasswordRequestForm = Depends()):
+    """Trang đăng nhập
+    Khi đăng nhập user sẽ được nhận một mã OTP qua email để xác minh
+    """
     user_response = await get_user_with_password(login.username, login.password)
-    print(user_response)
     if not user_response:
         raise HTTPException(status_code=404, detail="Tài khoản hoặc mật khẩu không đúng.")
     user_id = user_response.get('user_id')
     username = user_response.get('username')
     is_active = user_response.get("is_active")
-    role_user = db.query(Role).join(UserRole, Role.id == UserRole.role_id).filter(UserRole.user_id == user_id).first().name
     if not user_id:
         raise HTTPException(status_code=500, detail="Lỗi xác thực!!")
     if is_active != True:
-        raise HTTPException(status_code=401, detail="Tài khoản của bạn bị vô hiệu hóa. Vui lòng liên hệ Admin để mở lại tài khoản.")   
+        raise HTTPException(status_code=401, detail="Tài khoản của bạn bị vô hiệu hóa. Vui lòng liên hệ Admin để mở lại tài khoản.")
+    otp_response = await send_email_otp(user_response["user_id"], user_response["email"])
+    if not otp_response or otp_response.get("status") != "success":
+        raise HTTPException(status_code=500, detail="Không thể gửi mã OTP. Vui lòng thử lại sau.")
+    return{
+        "message": "Mã OTP đã được gửi đến email của bạn. Vui lòng kiểm tra và nhập OTP để đăng nhập.",
+    }
+@router.post("/validate-otp", status_code=status.HTTP_200_OK)
+async def verify_otp(request: VerifyOTP, db: Session = Depends(get_db)):
+    """Xác thực OTP"""
+    if not request.user_id or not request.otp:
+        raise HTTPException(status_code=400, detail="Thiếu thông tin xác thực.")
+    otp_response = await validate_otp(request.user_id, request.otp)
+    if not otp_response or otp_response.get("status") != "success":
+        raise HTTPException(status_code=400, detail="Mã OTP không hợp lệ hoặc đã hết hạn.")
+
+    user_id_response = request.user_id
+    user_response = await get_user(user_id_response)
+
+    # Kiểm tra user_response
+    user_data = user_response.get("user") if user_response else None
+    if not user_data:
+        raise HTTPException(status_code=404, detail="Tài khoản không tồn tại.")
+
+    user_id = user_data.get("id")
+    print(user_id)
+    username = user_data.get("username")
+
+    if not user_id:
+        raise HTTPException(status_code=500, detail="Lỗi hệ thống: user_id không hợp lệ.")
+
+    # Kiểm tra role của user
+    role = db.query(Role).join(UserRole, Role.id == UserRole.role_id).filter(UserRole.user_id == user_id).first()
+    if role:
+        role_user = role.name
+    else:
+        default_role = db.query(Role).filter(Role.name == "User").first()
+        if not default_role:
+            raise HTTPException(status_code=500, detail="Vai trò mặc định không tồn tại!")
+        
+        new_user_role = UserRole(user_id=user_id, role_id=default_role.id)
+        db.add(new_user_role)
+        db.commit()
+        role_user = default_role.name
+
+    # Kiểm tra user_id trước khi cập nhật
     if not await update_last_login(user_id):
         raise HTTPException(status_code=500, detail="Không cập nhật được lần đăng nhập cuối cùng")
-    access_token = create_access_token(data={"sub": user_id, "role": role_user, "username": username})
+
+    # Tạo access token
+    access_token = create_access_token(data={"sub": str(user_id), "role": role_user, "username": username})
     await log_user_action(user_id, f"{username} đã đăng nhập thành công!")
+
     return {
         "access_token": access_token, 
         "token_type": "bearer", 
         "username": username
     }
+
 @router.post("/sign_up", status_code=status.HTTP_201_CREATED)
-async def sign_up(sign_up: SignUp, db: dict = Depends(get_db)):
+async def sign_up(sign_up: SignUp, db: Session = Depends(get_db)):
     """Trang đăng ký"""
     user_response = await sign_up_user(
         sign_up.first_name, sign_up.last_name, sign_up.username, sign_up.email, sign_up.password
     )
-    
     if not user_response or "user" not in user_response or "id" not in user_response["user"]:
         raise HTTPException(status_code=500, detail="Lỗi: Không lấy được user_id từ User Service")
     role = db.query(Role).filter(Role.name == "User").first()
     user_id = user_response["user"]["id"]
     db.add(UserRole(user_id=user_id, role_id=role.id))
     db.commit()
+    activation_response = await generate_activation_token(user_id)
+    if not activation_response or "activation_token" not in activation_response:
+        raise HTTPException(status_code=500, detail="Lỗi tạo token kích hoạt")
+    activation_token = activation_response["activation_token"]
+    email_response = await active_account(user_id,sign_up.email, activation_token)
+    if not email_response or email_response.get("status") != "success":
+        print(email_response)
+        raise HTTPException(status_code=500, detail="Lỗi kích hoạt tài khoản")
     await log_user_action(user_id, f"{sign_up.username} đã đăng ký thành công!")
+   
     return {
-        "message": "Người dùng đã đăng ký thành công!", 
+        "message": "Người dùng đã đăng ký thành công! Email kích hoạt đã được gửi.", 
         "user_id": user_response["user"]["id"],
         "username": sign_up.username,
         "email": sign_up.email
@@ -103,7 +161,7 @@ async def logout(token: str = Depends(oauth2_scheme), current_user: dict = Depen
     }
 
 @router.get("/validate-token", status_code=status.HTTP_200_OK)
-async def validate_token(token: str = Depends(oauth2_scheme), current_user: dict = Depends(get_current_user)):
+async def validate_token(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)):
     """Trang kiểm tra token"""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -126,3 +184,10 @@ async def validate_token(token: str = Depends(oauth2_scheme), current_user: dict
         "username": user_data["username"],
         "role": role
     }  
+# Xác minh tài khoản
+
+    
+
+
+    
+        

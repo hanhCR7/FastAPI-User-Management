@@ -8,3 +8,14 @@ class EmailRequest(BaseModel):
 class EmailResponse(BaseModel):
     status: str
     message: str
+
+class ActivationEmailRequest(BaseModel):
+    user_id: int
+    recipient: EmailStr
+    activation_token: str
+class OTPRequest(BaseModel):
+    user_id: int
+    email: EmailStr
+class VerifyOTPRequest(BaseModel):
+    user_id: int
+    otp: str

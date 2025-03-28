@@ -69,4 +69,5 @@ class EditUserActive(BaseModel):
     is_active: bool
     class Config:
         from_attributes  = True
-    
+class ActivationTokenRequest(BaseModel):
+    user_id: int

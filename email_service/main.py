@@ -6,6 +6,6 @@ app = FastAPI(title="Email Service API")
 # Gắn router
 app.include_router(send_email.router)
 app.include_router(otp.router)
-@app.get("/")
+@app.get("/api/email_service/")
 async def root():
     return {"message": "Welcome to Email Service!"}

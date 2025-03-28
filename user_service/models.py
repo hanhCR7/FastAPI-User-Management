@@ -17,6 +17,7 @@ class Users(Base):
     first_name = Column(String)
     last_name = Column(String)
     password_hash = Column(String, nullable=False)
+    activation_token = Column(String, nullable=True)
     is_active = Column(Boolean, default=False)
     status = Column(Enum(UserStatus, name="userstatus"), default=UserStatus.Inactive) 
     created_at = Column(DateTime, server_default=func.now())

@@ -1,5 +1,6 @@
 import io
 import os
+import uuid
 import pandas as pd
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ from models import Users, UserStatus, Log
 from connect_service import validate_token_user
 from routers.logs import create_log
 from verify_api_key import verify_api_key
-from user_schemas import CreateUserRequest, UserResponse, UserStatus, UpdatePassword, AuthRequest, ListUserActive, EditUserActive
+from user_schemas import CreateUserRequest, UserResponse, UserStatus, UpdatePassword, AuthRequest, ListUserActive, EditUserActive, ActivationTokenRequest
 router = APIRouter(prefix="/api/user_service",tags=["users"])
 bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 load_dotenv()
@@ -48,7 +49,7 @@ async def authenticate_user(data: AuthRequest,db: db_dependency):
     return {
         "user_id": user.id, 
         "username": user.username,
-        "password_hash": user.password_hash,
+        "email": user.email,
         "status": user.status, 
         "is_active": user.is_active
     }
@@ -66,8 +67,8 @@ async def create_user(create_user: CreateUserRequest, db: db_dependency,server_c
         username=create_user.username,
         email=create_user.email,
         password_hash=password_hash,
-        is_active=True,
-        status=UserStatus.Active,
+        is_active=False,
+        status=UserStatus.Inactive,
     )
     db.add(create_user_model)
     db.commit()
@@ -221,4 +222,34 @@ async def edit_active_user(user_id: int, db: db_dependency, current_user: dict =
     return {
         "details": "Cập nhật trạng thái người dùng thành công!",
         "user": EditUserActive.from_orm(user)
+    }
+@router.post("/generate-activation-token", status_code=status.HTTP_200_OK)
+async def generate_activation_token(request: ActivationTokenRequest, db: db_dependency):
+    user = db.query(Users).filter(Users.id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Người dùng không tồn tại!!!")
+    activation_token = str(uuid.uuid4())
+    print(f"🔹 TOken: {activation_token}")
+    user.activation_token = activation_token
+    print(f"🔹 Trước khi cập nhật: {user.activation_token}")
+    db.commit()
+    db.refresh(user)
+    print(f"🔹 Sau khi commit: {user.activation_token}")
+    return {
+        "details": "Tạo token kích hoạt thành công!",
+        "activation_token": activation_token
+    }
+@router.get("/activate", status_code=status.HTTP_200_OK)
+async def activate_user(token: str, db: db_dependency):
+    """Kích hoạt tài khoản người dùng."""
+    user = db.query(Users).filter(Users.activation_token == token).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token không hợp lệ!!!")
+    user.status = UserStatus.Active
+    user.is_active = True
+    user.activation_token = None
+    db.commit()
+    db.refresh(user)
+    return {
+        "details": "Kích hoạt tài khoản thành công!"
     }
